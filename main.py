@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 import httpx
 import base64
 from typing import Optional, Dict, Any
+import asyncio
 
 app = FastAPI()
 
@@ -23,19 +24,21 @@ IMAGE_SYSTEM_INSTRUCTION = "describe the image in detail as prompt."
 
 
 async def send_message(chat_id: int, text: str, parse_mode: Optional[str] = "Markdown") -> Dict[str, Any]:
-    url = f"{TELEGRAM_API}/sendMessage"
-    data = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(url, json=data)
-        return r.json()
+        try:
+            r = await client.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": parse_mode})
+            return r.json()
+        except:
+            return {}
 
 
 async def edit_message(chat_id: int, message_id: int, text: str, parse_mode: Optional[str] = "Markdown") -> Dict[str, Any]:
-    url = f"{TELEGRAM_API}/editMessageText"
-    data = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": parse_mode}
     async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(url, json=data)
-        return r.json()
+        try:
+            r = await client.post(f"{TELEGRAM_API}/editMessageText", json={"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": parse_mode})
+            return r.json()
+        except:
+            return {}
 
 
 async def get_file_path(file_id: str) -> str:
@@ -53,12 +56,10 @@ async def download_file_bytes(file_path: str) -> bytes:
 
 
 async def call_gemini_text(user_message: str) -> Dict[str, Any]:
-    body = {
-        "contents": [{"role": "user", "parts": [{"text": user_message}]}],
-        "system_instruction": TEXT_SYSTEM_INSTRUCTION,
-        "generationConfig": {"temperature": 1.7, "maxOutputTokens": 8192},
-        "tools": [{"googleSearch": {}}]
-    }
+    body = {"contents": [{"role": "user", "parts": [{"text": user_message}]}],
+            "system_instruction": TEXT_SYSTEM_INSTRUCTION,
+            "generationConfig": {"temperature": 1.7, "maxOutputTokens": 8192},
+            "tools": [{"googleSearch": {}}]}
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(GEMINI_URL, headers=headers, json=body)
@@ -67,13 +68,9 @@ async def call_gemini_text(user_message: str) -> Dict[str, Any]:
 
 async def call_gemini_image(image_bytes: bytes, prompt_text: str) -> Dict[str, Any]:
     b64 = base64.b64encode(image_bytes).decode("utf-8")
-    body = {
-        "contents": [
-            {"parts": [{"inline_data": {"mime_type": "image/jpeg", "data": b64}}, {"text": prompt_text}]}
-        ],
-        "system_instruction": IMAGE_SYSTEM_INSTRUCTION,
-        "generationConfig": {"temperature": 0.0, "maxOutputTokens": 1024}
-    }
+    body = {"contents": [{"parts": [{"inline_data": {"mime_type": "image/jpeg", "data": b64}}, {"text": prompt_text}]}],
+            "system_instruction": IMAGE_SYSTEM_INSTRUCTION,
+            "generationConfig": {"temperature": 0.0, "maxOutputTokens": 1024}}
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(GEMINI_URL, headers=headers, json=body)
@@ -88,28 +85,28 @@ def extract_gemini_response(response_data: Dict[str, Any]) -> str:
             if parts:
                 return parts[0].get("text", "No response available")
         return "No response available"
-    except Exception as e:
-        return f"Error parsing response: {str(e)}"
+    except:
+        return "No response available"
 
 
 async def handle_text_message(chat_id: int, user_message: str):
     status_msg = await send_message(chat_id, "Gemini is typing...", parse_mode=None)
-    if not status_msg.get("ok"):
+    status_msg_id = status_msg.get("result", {}).get("message_id")
+    if not status_msg_id:
         return
-    status_msg_id = status_msg["result"]["message_id"]
     try:
         response_data = await call_gemini_text(user_message)
         ai_response = extract_gemini_response(response_data)
         await edit_message(chat_id, status_msg_id, ai_response, parse_mode="Markdown")
-    except Exception as e:
-        await edit_message(chat_id, status_msg_id, f"An error occurred: {str(e)}", parse_mode=None)
+    except:
+        await edit_message(chat_id, status_msg_id, "An error occurred.", parse_mode=None)
 
 
 async def describe_image(chat_id: int, file_id: str, caption: Optional[str] = None):
     status_msg = await send_message(chat_id, "Analyzing your image...", parse_mode=None)
-    if not status_msg.get("ok"):
+    status_msg_id = status_msg.get("result", {}).get("message_id")
+    if not status_msg_id:
         return
-    status_msg_id = status_msg["result"]["message_id"]
     try:
         file_path = await get_file_path(file_id)
         image_bytes = await download_file_bytes(file_path)
@@ -117,41 +114,33 @@ async def describe_image(chat_id: int, file_id: str, caption: Optional[str] = No
         response_data = await call_gemini_image(image_bytes, prompt)
         ai_response = extract_gemini_response(response_data)
         await edit_message(chat_id, status_msg_id, ai_response, parse_mode="Markdown")
-    except Exception as e:
-        await edit_message(chat_id, status_msg_id, f"An error occurred: {str(e)}", parse_mode=None)
+    except:
+        await edit_message(chat_id, status_msg_id, "An error occurred.", parse_mode=None)
 
 
 async def handle_message(message: Dict[str, Any]):
     chat_id = message["chat"]["id"]
-
     if "text" in message:
         text = message["text"]
         if text == "/start":
             first_name = message.get("from", {}).get("first_name", "there")
-            welcome = f"Hello {first_name}! I'm your Gemini-powered AI assistant, ready to help with anything from quick answers to deep dives. What's on your mind today?"
-            await send_message(chat_id, welcome, parse_mode=None)
+            await send_message(chat_id, f"Hello {first_name}! I'm your Gemini-powered AI assistant. What's on your mind today?", parse_mode=None)
             return
         if text.startswith("/"):
             return
         await handle_text_message(chat_id, text)
         return
-
     if "photo" in message:
         file_id = message["photo"][-1]["file_id"]
-        caption = message.get("caption")
-        await describe_image(chat_id, file_id, caption)
+        await describe_image(chat_id, file_id, message.get("caption"))
         return
-
     if "document" in message:
-        document = message["document"]
-        mime_type = document.get("mime_type", "")
-        file_name = document.get("file_name", "")
-        if mime_type in ["image/png", "image/jpeg"] or file_name.lower().endswith((".png", ".jpg", ".jpeg")):
-            await describe_image(chat_id, document["file_id"], message.get("caption"))
+        doc = message["document"]
+        if doc.get("mime_type", "").startswith("image/") or doc.get("file_name", "").lower().endswith((".png", ".jpg", ".jpeg")):
+            await describe_image(chat_id, doc["file_id"], message.get("caption"))
         else:
             await send_message(chat_id, "Sorry, the bot only supports images right now.", parse_mode=None)
         return
-
     if "voice" in message or "audio" in message or "video" in message or "video_note" in message:
         await send_message(chat_id, "Sorry, the bot only supports images right now.", parse_mode=None)
         return
@@ -164,7 +153,6 @@ async def home():
 
 @app.post("/webhook")
 async def telegram_webhook(req: Request):
-    update = await req.json()
-    if "message" in update:
-        await handle_message(update["message"])
+    data = await req.json()
+    asyncio.create_task(handle_message(data["message"])) if "message" in data else None
     return JSONResponse({"ok": True})

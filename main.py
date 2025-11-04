@@ -243,5 +243,11 @@ def main():
             print(f"Error in main loop: {str(e)}")
             time.sleep(5)
 
-if __name__ == "__main__":
-    main()
+app = FastAPI()
+
+@app.post("/webhook")
+async def telegram_webhook(req: Request):
+    update = await req.json()
+    if "message" in update:
+        handle_message(update["message"])
+    return {"ok": True}
